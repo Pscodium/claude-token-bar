@@ -754,7 +754,7 @@ export const register: Register = on => {
         <Box flexDirection="row" alignItems="center" gap={1}>
           <Button
             key="expand"
-            label={isOpen ? '▴' : '▾'}
+            label={isOpen ? '▾' : '▴'}
             plain
             onPress={() => update($, expanded, v => !v)}
           />

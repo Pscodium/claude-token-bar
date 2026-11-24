@@ -5,10 +5,10 @@ nota de qualidade, % do contexto usado, tempo até o prompt cache expirar e % do
 Também traz ferramentas para gastar menos tokens.
 
 ```
-[mascote] ✓  [A] 87 qualidade   ◔ 25% contexto   ◕ 4m cache   ◑ 49% semana      ▾  ⚙
+[mascote] ✓  [A] 87 qualidade   ◔ 25% contexto   ◕ 4m cache   ◑ 49% semana      ▴  ⚙
 ```
 
-- **▾** abre a linha estendida: janela 5h, quanto falta para a sessão acabar e para a semana renovar, tokens no contexto, acerto do cache, último turno
+- **▴** abre a linha estendida: janela 5h, quanto falta para a sessão acabar e para a semana renovar, tokens no contexto, acerto do cache, último turno
   (duração · tokens gerados), tokens gerados na sessão, custo e o tool que mais gastou.
 - **⚙** abre o painel lateral (responsivo) com nota, cartões de contexto/cache/5h/semana, ferramentas,
   gráfico de tokens por tool, maiores saídas e dicas.
