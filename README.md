@@ -51,9 +51,17 @@ No app desktop (onde `/plugin` não roda): clique no **+** ao lado do campo de m
 ## Desenvolvimento
 
 ```
-claude --plugin-dir ./
 claude plugin validate .
+claude --plugin-dir ./
 ```
+
+Ou, com hot reload numa sessão que já carrega uma pasta de mods:
+
+```powershell
+./scripts/sync-dev.ps1 -Dest "<pasta de mods>\token-bar"
+```
+
+Fluxo completo (para humanos e para o Claude): `.claude/skills/mod-workflow/SKILL.md`.
 
 Código em `hooks/register.tsx`; tipos do estado em `types/index.d.ts`. Limiares no topo do arquivo
 (`BIG_OUTPUT_TOKENS`, `CACHE_WARN_MS`, `COMPACT_AT`).
