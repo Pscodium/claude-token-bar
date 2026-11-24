@@ -5,8 +5,7 @@ nota de qualidade, % do contexto usado, tempo até o prompt cache expirar e % do
 Também traz ferramentas para gastar menos tokens.
 
 ```
-[mascote]  Token Optimizer ✓ Tudo certo.            [Compactar] [Relatório]
-           [A] 87 qualidade   ◔ 25% contexto   ◕ 4m cache   ◑ 49% semana
+[mascote] ✓  [A] 87 qualidade   ◔ 25% contexto   ◕ 4m cache   ◑ 49% semana      🗜  ⚙
 ```
 
 ## O que faz
@@ -20,9 +19,11 @@ Também traz ferramentas para gastar menos tokens.
 - No app desktop: anéis e mascote em SVG. No terminal e no VS Code: versão em texto colorido.
 
 **Ferramentas**
-- `/otimizar`: relatório com contexto, cache, janela de 5 h, semana, custo estimado, os tools que mais
-  gastaram tokens, as 5 maiores saídas da sessão e dicas do que fazer.
-- **Compactar**: botão que aparece com contexto ≥ 50% e roda o compact da sessão.
+- **⚙ / `/otimizar`**: abre o painel lateral com botões **Compactar contexto**, **rtk gain**, **rtk discover**
+  e **Zerar estatísticas**, mais o relatório (contexto, cache, janela de 5 h, semana, custo estimado, tools que
+  mais gastaram tokens, 5 maiores saídas e dicas). Onde não há painel, `/otimizar` imprime o relatório.
+- **🗜 Compactar**: roda o compact da sessão. No app desktop o mod ainda não pode compactar sozinho;
+  aí ele avisa para digitar `/compact`.
 - **Aviso de cache**: toast quando faltam 45 s para o cache expirar e você está parado.
 - **Aviso semanal**: toast ao passar de 80% e 95% do limite semanal.
 - **Saída gigante**: toast quando um tool devolve mais de ~12k tokens, com dica (Read sem `limit`,

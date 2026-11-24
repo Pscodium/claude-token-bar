@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheInfo, Stats } from '../types'
+import type { CacheInfo, Stats, ToolOut } from '../types'
 
 const cache = atom({ plugin: 'token-bar', key: 'cache' } as const, null as CacheInfo | null)
 const tick = atom({ plugin: 'token-bar', key: 'tick' } as const, 0)
@@ -212,6 +212,40 @@ async function report($: EngineInterface): Promise<string> {
   return lines.join('\n')
 }
 
+const PANE = 'token-optimizer'
+
+const toolOut = atom({ plugin: 'token-bar', key: 'toolOut' } as const, null as ToolOut | null)
+
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+}
+
+async function runTool($: EngineInterface, title: string, argv: string[]): Promise<void> {
+  await update($, toolOut, () => ({ title, text: 'rodando...', ok: true }))
+  try {
+    const r = await $.process.run(argv, { timeoutMs: 60_000 })
+    const text = stripAnsi((r.stdout + (r.stderr ? `\n${r.stderr}` : '')).trim()).slice(-6000)
+    await update($, toolOut, () => ({ title, text: text || '(sem saída)', ok: r.exitCode === 0 }))
+  } catch (err) {
+    await update($, toolOut, () => ({ title, text: `Não rodou: ${String(err)}`, ok: false }))
+  }
+}
+
+async function compactNow($: EngineInterface): Promise<void> {
+  if (await read($, busy)) {
+    $.ui.toast('Espere o turno terminar para compactar.')
+    return
+  }
+  try {
+    $.ui.toast('Compactando contexto...')
+    await $.session.compact()
+  } catch {
+    // App desktop/SDK ainda não deixa mod compactar fora de um turno.
+    $.ui.toast('Aqui o mod não consegue compactar sozinho: digite /compact no campo de mensagem.')
+  }
+}
+
 export const register: Register = on => {
   let cacheWarned = 0
   const weekWarned = new Set<number>()
@@ -219,7 +253,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'otimizar',
-      description: 'Token Optimizer: relatório de contexto, cache, limites e tools que mais gastam',
+      description: 'Token Optimizer: painel com relatório e ferramentas (compactar, rtk gain/discover)',
     })
     $.clock.every(5000, () => {
       void (async () => {
@@ -237,6 +271,8 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'otimizar' }, async $ => {
+    const { isPlaced } = await $.ui.open({ id: PANE, title: 'Token Optimizer' })
+    if (isPlaced) return { text: 'Painel do Token Optimizer aberto.', isTextDisplayOnly: true }
     return { text: await report($), isTextDisplayOnly: true }
   })
 
@@ -291,6 +327,47 @@ export const register: Register = on => {
     return r
   })
 
+  // Painel lateral: relatório + ferramentas.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    await read($, tick)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    const out = await read($, toolOut)
+    const md = await report($)
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text bold>Ferramentas</Text>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button key="p-compact" label="Compactar contexto" onPress={() => compactNow($)} />
+          <Button key="p-gain" label="rtk gain" onPress={() => runTool($, 'rtk gain', ['rtk', 'gain'])} />
+          <Button
+            key="p-discover"
+            label="rtk discover"
+            onPress={() => runTool($, 'rtk discover', ['rtk', 'discover'])}
+          />
+          <Button
+            key="p-reset"
+            label="Zerar estatísticas"
+            onPress={async () => {
+              await update($, stats, () => ({ byTool: {}, biggest: [] }))
+              await update($, toolOut, () => null)
+            }}
+          />
+        </Box>
+        {out ? (
+          <Box flexDirection="column">
+            <Text bold color={out.ok ? GREEN : RED}>
+              {out.title}
+            </Text>
+            <Markdown text={'```\n' + out.text + '\n```'} />
+          </Box>
+        ) : null}
+        <Markdown text={md} />
+      </Box>
+    )
+  })
+
+  // Barra acima do input.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     await read($, tick)
@@ -330,70 +407,53 @@ export const register: Register = on => {
           <Text color={cacheColor}>{cacheText}</Text>
           <Text dimColor> cache · </Text>
           <Text>{weekText}</Text>
-          <Text dimColor> semana</Text>
+          <Text dimColor> semana · /otimizar</Text>
         </Box>
       )
     }
 
     const { Box, Text, Svg, Button } = $.ui.resolve(e)
-    const canCompact = ctxPct >= COMPACT_AT && !isBusy
+    const metric = (key: string, icon: string, alt: string, value: string, label: string) => (
+      <Box key={key} flexDirection="row" alignItems="center" gap={1}>
+        <Svg source={icon} alt={alt} width={16} height={16} />
+        <Text bold>{value}</Text>
+        <Text dimColor>{label}</Text>
+      </Box>
+    )
 
     return (
-      <Box flexDirection="row" alignItems="center" gap={1} padding={1}>
+      <Box flexDirection="row" alignItems="center" gap={2} paddingX={1}>
         <Svg
           source={mascot(isBusy)}
           alt={isBusy ? 'Claude digitando' : 'Claude parado'}
-          width={46}
-          height={30}
+          width={31}
+          height={20}
           isInteractive
         />
-        <Box flexDirection="column">
-          <Box flexDirection="row" alignItems="center" gap={1}>
-            <Text bold>Token Optimizer</Text>
-            <Svg source={check(statusColor)} alt="status" width={14} height={14} />
-            <Text dimColor>{status}</Text>
-            {canCompact ? (
-              <Button
-                key="compact"
-                label="Compactar"
-                onPress={async () => {
-                  $.ui.toast('Compactando contexto...')
-                  await $.session.compact()
-                }}
-              />
-            ) : null}
-            <Button
-              key="report"
-              label="Relatório"
-              onPress={async () => {
-                const st = await read($, stats)
-                const top = Object.entries(st.byTool).sort((a, b) => b[1].tokens - a[1].tokens)[0]
-                $.ui.toast(
-                  (top ? `Maior gasto: ${top[0]} (~${fmtK(top[1].tokens)} tokens). ` : '') +
-                    'Relatório completo: /otimizar',
-                )
-              }}
-            />
-          </Box>
-          <Box flexDirection="row" alignItems="center" gap={1}>
-            <Svg source={badge(letter(s), scoreColor(s))} alt={`nota ${letter(s)}`} width={16} height={16} />
-            <Text bold>{s}</Text>
-            <Text dimColor>qualidade </Text>
-            <Svg source={ring(ctxPct, usedColor(ctxPct))} alt="contexto" width={16} height={16} />
-            <Text bold>{ctxPct}%</Text>
-            <Text dimColor>contexto </Text>
-            <Svg source={ring(cachePct, cacheColor)} alt="cache" width={16} height={16} />
-            <Text bold>{cacheText}</Text>
-            <Text dimColor>cache </Text>
-            <Svg
-              source={ring(weekPct ?? 0, weekPct === null ? '#555555' : usedColor(weekPct))}
-              alt="semana"
-              width={16}
-              height={16}
-            />
-            <Text bold>{weekText}</Text>
-            <Text dimColor>semana</Text>
-          </Box>
+        <Svg source={check(statusColor)} alt={status} width={14} height={14} />
+        <Box flexDirection="row" alignItems="center" gap={3} flexGrow={1} flexWrap="wrap">
+          {metric('q', badge(letter(s), scoreColor(s)), `nota ${letter(s)}`, String(s), 'qualidade')}
+          {metric('ctx', ring(ctxPct, usedColor(ctxPct)), 'contexto', `${ctxPct}%`, 'contexto')}
+          {metric('cache', ring(cachePct, cacheColor), 'cache', cacheText, 'cache')}
+          {metric(
+            'week',
+            ring(weekPct ?? 0, weekPct === null ? '#555555' : usedColor(weekPct)),
+            'semana',
+            weekText,
+            'semana',
+          )}
+          {issues.length ? <Text color={YELLOW}>{status}</Text> : null}
+        </Box>
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Button key="compact" label={'\u{1F5DC}'} plain onPress={() => compactNow($)} />
+          <Button
+            key="tools"
+            label={'⚙'}
+            plain
+            onPress={async () => {
+              await $.ui.open({ id: PANE, title: 'Token Optimizer' })
+            }}
+          />
         </Box>
       </Box>
     )
