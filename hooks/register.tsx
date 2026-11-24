@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheInfo, Stats, ToolOut } from '../types'
+import type { CacheInfo, Stats, ToolOut, TurnInfo } from '../types'
 
 const cache = atom({ plugin: 'token-bar', key: 'cache' } as const, null as CacheInfo | null)
 const tick = atom({ plugin: 'token-bar', key: 'tick' } as const, 0)
@@ -17,7 +17,42 @@ function estTokens(text: string): number {
 }
 
 function fmtK(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+  const trim = (x: number) => (x >= 100 ? String(Math.round(x)) : x.toFixed(1).replace(/\.0$/, ''))
+  if (n >= 1_000_000) return `${trim(n / 1_000_000)}M`
+  if (n >= 1000) return `${trim(n / 1000)}k`
+  return String(n)
+}
+
+// Linha estendida: blocos (valor em cima, rótulo embaixo) em grade de largura fixa, quebrando em linhas iguais.
+type Tile = { value: string; label: string; color?: string }
+function tilesSvg(tiles: Tile[], width: number): string {
+  const minTile = 92
+  const perRow = Math.max(1, Math.min(tiles.length, Math.floor(width / minTile)))
+  const rows = Math.ceil(tiles.length / perRow)
+  const tw = width / perRow
+  const rh = 38
+  const h = rows * rh
+  const body = tiles
+    .map((t, i) => {
+      const col = i % perRow
+      const row = Math.floor(i / perRow)
+      const x = col * tw
+      const y = row * rh
+      const sep =
+        col > 0 ? `<line x1="${x.toFixed(1)}" y1="${y + 8}" x2="${x.toFixed(1)}" y2="${y + 30}" stroke="#3a3a3a"/>` : ''
+      const val = t.value.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      return (
+        sep +
+        `<text x="${(x + 12).toFixed(1)}" y="${y + 18}" font-size="13" font-weight="700" fill="${t.color ?? '#ededed'}">${val}</text>` +
+        `<text x="${(x + 12).toFixed(1)}" y="${y + 32}" font-size="10" fill="#8d8d8d">${t.label}</text>`
+      )
+    })
+    .join('')
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${h}" font-family="ui-sans-serif,system-ui,sans-serif">` +
+    body +
+    '</svg>'
+  )
 }
 
 function describeCall(tool: string, input: unknown): string {
@@ -213,7 +248,181 @@ async function report($: EngineInterface): Promise<string> {
 }
 
 const PANE = 'token-optimizer'
+let W = 340 // largura do painel em px; recalculada a cada desenho (responsivo)
+const CARD = '#1f1f1f'
+const TRACK = '#2e2e2e'
+const MUTED = '#9a9a9a'
+const FONT = 'font-family="ui-sans-serif,system-ui,sans-serif"'
 
+type Tip = { level: 'ok' | 'warn' | 'bad'; text: string }
+type Limit = { pct: number; resets?: string } | null
+type PaneData = {
+  score: number
+  status: string
+  statusColor: string
+  isBusy: boolean
+  ctxPct: number
+  ctxTokens: number
+  ctxWindow: number
+  cache: CacheInfo | null
+  cacheLeft: number
+  fiveH: Limit
+  week: Limit
+  costUsd: number | null
+  tools: { name: string; calls: number; tokens: number }[]
+  biggest: Stats['biggest']
+  tips: Tip[]
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function resetLabel(iso?: string): string {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  const h = Math.max(0, (t - Date.now()) / 3_600_000)
+  return h >= 24 ? `renova em ${Math.round(h / 24)}d` : `renova em ${Math.ceil(h)}h`
+}
+
+async function collect($: EngineInterface): Promise<PaneData> {
+  const usage = await $.session.usage()
+  const c = await read($, cache)
+  const st = await read($, stats)
+  const isBusy = await read($, busy)
+  const ctxPct = Math.round(usage.context.percent ?? 0)
+  const left = c ? c.at + c.ttlMs - (await $.clock.now()) : 0
+  const w = usage.rateLimits.find(l => l.kind === 'seven_day')
+  const f = usage.rateLimits.find(l => l.kind === 'five_hour')
+  const score_ = score(ctxPct, c ? c.hitPct : null)
+
+  const tips: Tip[] = []
+  if (ctxPct >= 80) tips.push({ level: 'bad', text: 'Contexto acima de 80%: a qualidade cai. Faça /compact ou /clear com um resumo.' })
+  else if (ctxPct >= COMPACT_AT) tips.push({ level: 'warn', text: `Contexto em ${ctxPct}%: bom momento para /compact.` })
+  if (c && left <= 0) tips.push({ level: 'bad', text: 'Cache expirou: a próxima mensagem paga o contexto inteiro de novo.' })
+  else if (c && c.hitPct < 50) tips.push({ level: 'warn', text: 'Pouco acerto de cache: evite trocar modelo/ferramentas no meio da conversa.' })
+  if (st.biggest.some(b => b.tool === 'Read' && b.tokens >= BIG_OUTPUT_TOKENS))
+    tips.push({ level: 'warn', text: 'Leituras grandes: use offset/limit ou Grep antes do Read.' })
+  if ((st.byTool.Bash?.tokens ?? 0) > 20_000)
+    tips.push({ level: 'warn', text: 'Bash gastou muito: confira rtk gain e rtk discover.' })
+  if (w && w.percentUsed >= 80) tips.push({ level: 'bad', text: 'Semana perto do limite: use modelos menores para tarefas simples.' })
+  if (tips.length === 0) tips.push({ level: 'ok', text: 'Sessão saudável. Nada a fazer.' })
+
+  const worst = tips.some(t => t.level === 'bad') ? 'bad' : tips.some(t => t.level === 'warn') ? 'warn' : 'ok'
+  return {
+    score: score_,
+    status: worst === 'ok' ? 'Tudo certo' : worst === 'warn' ? 'Atenção' : 'Precisa de ação',
+    statusColor: worst === 'ok' ? GREEN : worst === 'warn' ? YELLOW : RED,
+    isBusy,
+    ctxPct,
+    ctxTokens: usage.context.tokens ?? 0,
+    ctxWindow: usage.context.window,
+    cache: c,
+    cacheLeft: left,
+    fiveH: f ? { pct: Math.round(f.percentUsed), resets: f.resetsAt } : null,
+    week: w ? { pct: Math.round(w.percentUsed), resets: w.resetsAt } : null,
+    costUsd: usage.cost ? usage.cost.usd : null,
+    tools: Object.entries(st.byTool)
+      .map(([name, t]) => ({ name, ...t }))
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 6),
+    biggest: st.biggest,
+    tips,
+  }
+}
+
+function paneHeader(d: PaneData): string {
+  const r = 30
+  const circ = 2 * Math.PI * r
+  const col = scoreColor(d.score)
+  const mascotSvg = mascot(d.isBusy).replace('<svg ', '<svg x="14" y="22" width="69" height="45" ')
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 92" ${FONT}>` +
+    `<rect width="${W}" height="92" rx="12" fill="${CARD}"/>` +
+    mascotSvg +
+    `<text x="96" y="36" font-size="15" font-weight="700" fill="#ededed">Token Optimizer</text>` +
+    `<circle cx="101" cy="56" r="4" fill="${d.statusColor}"/>` +
+    `<text x="111" y="60" font-size="12" fill="${MUTED}">${esc(d.status)}</text>` +
+    (d.costUsd !== null
+      ? `<text x="96" y="78" font-size="11" fill="${MUTED}">custo ≈ US$ ${d.costUsd.toFixed(2)}</text>`
+      : '') +
+    `<g transform="translate(${W - 50} 46)">` +
+    `<circle r="${r}" fill="none" stroke="${TRACK}" stroke-width="7"/>` +
+    `<circle r="${r}" fill="none" stroke="${col}" stroke-width="7" stroke-linecap="round" transform="rotate(-90)" ` +
+    `stroke-dasharray="${((d.score / 100) * circ).toFixed(1)} ${circ.toFixed(1)}"/>` +
+    `<text y="2" text-anchor="middle" font-size="22" font-weight="800" fill="${col}">${letter(d.score)}</text>` +
+    `<text y="17" text-anchor="middle" font-size="10" fill="${MUTED}">${d.score}/100</text>` +
+    `</g></svg>`
+  )
+}
+
+function card(x: number, y: number, w: number, title: string, value: string, sub: string, pct: number | null, color: string): string {
+  const bw = w - 24
+  const fill = pct === null ? 0 : (Math.max(0, Math.min(100, pct)) / 100) * bw
+  return (
+    `<g transform="translate(${x} ${y})">` +
+    `<rect width="${w}" height="74" rx="10" fill="${CARD}"/>` +
+    `<text x="12" y="20" font-size="11" fill="${MUTED}">${esc(title)}</text>` +
+    `<text x="12" y="44" font-size="20" font-weight="700" fill="#ededed">${esc(value)}</text>` +
+    `<rect x="12" y="52" width="${bw}" height="5" rx="2.5" fill="${TRACK}"/>` +
+    (fill > 0 ? `<rect x="12" y="52" width="${fill.toFixed(1)}" height="5" rx="2.5" fill="${color}"/>` : '') +
+    `<text x="12" y="68" font-size="10" fill="${MUTED}">${esc(sub)}</text>` +
+    `</g>`
+  )
+}
+
+function metricCards(d: PaneData): string {
+  const gap = 8
+  const cw = (W - gap) / 2
+  const c = d.cache
+  const cacheValue = !c ? '—' : d.cacheLeft > 0 ? shortTime(d.cacheLeft) : 'expirado'
+  const cachePct = c ? Math.max(0, (d.cacheLeft / c.ttlMs) * 100) : null
+  const cacheColor = !c || d.cacheLeft <= 0 ? RED : d.cacheLeft < 60_000 ? YELLOW : GREEN
+  const lim = (l: Limit) => (l ? `${l.pct}%` : '—')
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${74 * 2 + gap}" ${FONT}>` +
+    card(0, 0, cw, 'Contexto', `${d.ctxPct}%`, `${fmtK(d.ctxTokens)} de ${fmtK(d.ctxWindow)} tokens`, d.ctxPct, usedColor(d.ctxPct)) +
+    card(
+      cw + gap,
+      0,
+      cw,
+      'Cache',
+      cacheValue,
+      c ? `${c.hitPct}% acerto · TTL ${c.ttlMs >= 3_600_000 ? '1h' : '5m'}` : 'sem pedido ainda',
+      cachePct,
+      cacheColor,
+    ) +
+    card(0, 74 + gap, cw, 'Janela 5h', lim(d.fiveH), d.fiveH ? resetLabel(d.fiveH.resets) : 'sem leitura', d.fiveH?.pct ?? null, usedColor(d.fiveH?.pct ?? 0)) +
+    card(cw + gap, 74 + gap, cw, 'Semana', lim(d.week), d.week ? resetLabel(d.week.resets) : 'sem leitura', d.week?.pct ?? null, usedColor(d.week?.pct ?? 0)) +
+    `</svg>`
+  )
+}
+
+function toolBars(tools: PaneData['tools']): string {
+  const row = 24
+  const h = tools.length * row + 12
+  const max = Math.max(1, ...tools.map(t => t.tokens))
+  const labelW = 96
+  const barW = W - labelW - 70
+  const rows = tools
+    .map((t, i) => {
+      const y = 8 + i * row
+      const w = Math.max(2, (t.tokens / max) * barW)
+      const name = t.name.startsWith('mcp__') ? t.name.split('__').pop() ?? t.name : t.name
+      return (
+        `<text x="12" y="${y + 13}" font-size="11" fill="#d8d8d8">${esc(name.slice(0, 14))}</text>` +
+        `<rect x="${labelW}" y="${y + 3}" width="${barW}" height="12" rx="4" fill="${TRACK}"/>` +
+        `<rect x="${labelW}" y="${y + 3}" width="${w.toFixed(1)}" height="12" rx="4" fill="${i === 0 ? ORANGE : '#b8694f'}"/>` +
+        `<text x="${W - 12}" y="${y + 13}" text-anchor="end" font-size="11" fill="${MUTED}">${fmtK(t.tokens)} · ${t.calls}×</text>`
+      )
+    })
+    .join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${h}" ${FONT}><rect width="${W}" height="${h}" rx="10" fill="${CARD}"/>${rows}</svg>`
+}
+
+const expanded = atom({ plugin: 'token-bar', key: 'expanded' } as const, false)
+const turn = atom({ plugin: 'token-bar', key: 'turn' } as const, { startedAt: 0, lastMs: 0, lastIn: 0, lastOut: 0, steps: 0, sessionOut: 0, turns: 0 } as TurnInfo)
 const toolOut = atom({ plugin: 'token-bar', key: 'toolOut' } as const, null as ToolOut | null)
 
 function stripAnsi(s: string): string {
@@ -296,11 +505,15 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     await update($, busy, () => true)
+    const startedAt = await $.clock.now()
+    await update($, turn, t => ({ ...t, startedAt, lastIn: 0, lastOut: 0, steps: 0 }))
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     await update($, busy, () => false)
+    const endedAt = await $.clock.now()
+    await update($, turn, t => ({ ...t, lastMs: t.startedAt ? endedAt - t.startedAt : 0, turns: t.turns + 1 }))
     const usage = await $.session.usage()
     const weekly = usage.rateLimits.find(l => l.kind === 'seven_day')
     for (const mark of [80, 95]) {
@@ -323,46 +536,99 @@ export const register: Register = on => {
         hitPct: total > 0 ? Math.round((u.cache_read_input_tokens / total) * 100) : 0,
       }
       await update($, cache, () => info)
+      await update($, turn, t => ({
+        ...t,
+        lastIn: t.lastIn + total,
+        lastOut: t.lastOut + u.output_tokens,
+        steps: t.steps + 1,
+        sessionOut: t.sessionOut + u.output_tokens,
+      }))
     }
     return r
   })
 
-  // Painel lateral: relatório + ferramentas.
+  // Painel lateral: dashboard + ferramentas.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     await read($, tick)
-    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const out = await read($, toolOut)
-    const md = await report($)
+
+    if (e.surface === 'terminal' || e.surface === 'vscode') {
+      const { Markdown } = $.ui.resolve(e)
+      return <Markdown text={await report($)} />
+    }
+
+    const { Box, Text, Button, Svg, Markdown } = $.ui.resolve(e)
+    // Largura real do painel: colunas do corpo × ~7.6 px por célula, menos o padding.
+    W = Math.max(260, Math.min(1000, Math.round((e.props.bodyColumns ?? 44) * 7.6) - 24))
+    const d = await collect($)
+    const resetStats = async () => {
+      await update($, stats, () => ({ byTool: {}, biggest: [] }))
+      await update($, toolOut, () => null)
+    }
 
     return (
-      <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column" gap={1} paddingX={1}>
+        <Svg source={paneHeader(d)} alt={`Nota ${letter(d.score)}, ${d.score} de 100. ${d.status}`} width={W} />
+        <Svg source={metricCards(d)} alt="Contexto, cache, janela de 5 horas e semana" width={W} />
+
         <Text bold>Ferramentas</Text>
         <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Button key="p-compact" label="Compactar contexto" onPress={() => compactNow($)} />
-          <Button key="p-gain" label="rtk gain" onPress={() => runTool($, 'rtk gain', ['rtk', 'gain'])} />
+          <Button key="p-compact" label={'\u{1F5DC} Compactar'} onPress={() => compactNow($)} />
+          <Button key="p-gain" label={'\u{1F4C8} rtk gain'} onPress={() => runTool($, 'rtk gain', ['rtk', 'gain'])} />
           <Button
             key="p-discover"
-            label="rtk discover"
+            label={'\u{1F50D} rtk discover'}
             onPress={() => runTool($, 'rtk discover', ['rtk', 'discover'])}
           />
-          <Button
-            key="p-reset"
-            label="Zerar estatísticas"
-            onPress={async () => {
-              await update($, stats, () => ({ byTool: {}, biggest: [] }))
-              await update($, toolOut, () => null)
-            }}
-          />
+          <Button key="p-reset" label={'↺ Zerar'} onPress={resetStats} />
         </Box>
         {out ? (
-          <Box flexDirection="column">
+          <Box flexDirection="column" borderStyle="round" borderColor={out.ok ? '#2f5f3a' : '#6b2b2b'} paddingX={1}>
             <Text bold color={out.ok ? GREEN : RED}>
               {out.title}
             </Text>
             <Markdown text={'```\n' + out.text + '\n```'} />
           </Box>
         ) : null}
-        <Markdown text={md} />
+
+        <Text bold>Onde os tokens foram</Text>
+        {d.tools.length ? (
+          <Svg source={toolBars(d.tools)} alt="Tokens estimados por tool" width={W} />
+        ) : (
+          <Text dimColor>Nenhuma chamada de tool ainda.</Text>
+        )}
+
+        {d.biggest.length ? (
+          <Box flexDirection="column">
+            <Text bold>Maiores saídas</Text>
+            {d.biggest.map((b, i) => (
+              <Box key={`big-${i}`} flexDirection="row" gap={1}>
+                <Text bold color={b.tokens >= BIG_OUTPUT_TOKENS ? YELLOW : undefined}>
+                  {fmtK(b.tokens).padStart(6)}
+                </Text>
+                <Text color={ORANGE}>{b.tool}</Text>
+                <Text dimColor>{b.label}</Text>
+              </Box>
+            ))}
+          </Box>
+        ) : null}
+
+        <Text bold>Dicas</Text>
+        {d.tips.map((t, i) => (
+          <Box
+            key={`tip-${i}`}
+            flexDirection="row"
+            gap={1}
+            borderStyle="round"
+            borderColor={t.level === 'ok' ? '#2f5f3a' : t.level === 'warn' ? '#6b5320' : '#6b2b2b'}
+            paddingX={1}
+          >
+            <Text color={t.level === 'ok' ? GREEN : t.level === 'warn' ? YELLOW : RED}>
+              {t.level === 'ok' ? '✓' : t.level === 'warn' ? '!' : '✖'}
+            </Text>
+            <Text>{t.text}</Text>
+          </Box>
+        ))}
       </Box>
     )
   })
@@ -421,8 +687,30 @@ export const register: Register = on => {
       </Box>
     )
 
+    const isOpen = await read($, expanded)
+    const tn = await read($, turn)
+    const fiveH = usage.rateLimits.find(l => l.kind === 'five_hour')
+    const fivePct = fiveH ? Math.round(fiveH.percentUsed) : null
+    const st = await read($, stats)
+    const topTool = Object.entries(st.byTool).sort((a, b) => b[1].tokens - a[1].tokens)[0]
+    const secs = Math.round(tn.lastMs / 1000)
+    const rowW = Math.max(240, Math.round((e.props.bodyColumns ?? 90) * 7.6) - 70)
+    const hitColor = c ? (c.hitPct >= 80 ? GREEN : c.hitPct >= 50 ? YELLOW : RED) : undefined
+    const tiles: Tile[] = [
+      { value: fivePct === null ? '—' : `${fivePct}%`, label: 'janela 5h', color: fivePct === null ? undefined : usedColor(fivePct) },
+      { value: `${fmtK(usage.context.tokens ?? 0)} / ${fmtK(usage.context.window)}`, label: 'tokens no contexto' },
+      { value: c ? `${c.hitPct}%` : '—', label: 'acerto do cache', color: hitColor },
+      { value: tn.turns ? `${secs}s · ${fmtK(tn.lastOut)}` : '—', label: 'último turno' },
+      { value: fmtK(tn.sessionOut), label: 'tokens gerados' },
+      { value: usage.cost ? `$${usage.cost.usd.toFixed(2)}` : '—', label: 'custo da sessão' },
+      ...(topTool
+        ? [{ value: `${topTool[0].replace(/^mcp__.*__/, '')} ${fmtK(topTool[1].tokens)}`, label: 'maior gasto', color: ORANGE }]
+        : []),
+    ]
+
     return (
-      <Box flexDirection="row" alignItems="center" gap={2} paddingX={1}>
+      <Box flexDirection="column" paddingX={1}>
+      <Box flexDirection="row" alignItems="center" gap={2}>
         <Svg
           source={mascot(isBusy)}
           alt={isBusy ? 'Claude digitando' : 'Claude parado'}
@@ -445,7 +733,12 @@ export const register: Register = on => {
           {issues.length ? <Text color={YELLOW}>{status}</Text> : null}
         </Box>
         <Box flexDirection="row" alignItems="center" gap={1}>
-          <Button key="compact" label={'\u{1F5DC}'} plain onPress={() => compactNow($)} />
+          <Button
+            key="expand"
+            label={isOpen ? '▴' : '▾'}
+            plain
+            onPress={() => update($, expanded, v => !v)}
+          />
           <Button
             key="tools"
             label={'⚙'}
@@ -455,6 +748,12 @@ export const register: Register = on => {
             }}
           />
         </Box>
+      </Box>
+      {isOpen ? (
+        <Box paddingLeft={6} paddingTop={1}>
+          <Svg source={tilesSvg(tiles, rowW)} alt={tiles.map(t => `${t.label} ${t.value}`).join(', ')} width={rowW} />
+        </Box>
+      ) : null}
       </Box>
     )
   })

@@ -5,8 +5,13 @@ nota de qualidade, % do contexto usado, tempo até o prompt cache expirar e % do
 Também traz ferramentas para gastar menos tokens.
 
 ```
-[mascote] ✓  [A] 87 qualidade   ◔ 25% contexto   ◕ 4m cache   ◑ 49% semana      🗜  ⚙
+[mascote] ✓  [A] 87 qualidade   ◔ 25% contexto   ◕ 4m cache   ◑ 49% semana      ▾  ⚙
 ```
+
+- **▾** abre a linha estendida: janela 5h, tokens no contexto, acerto do cache, último turno
+  (duração · tokens gerados), tokens gerados na sessão, custo e o tool que mais gastou.
+- **⚙** abre o painel lateral (responsivo) com nota, cartões de contexto/cache/5h/semana, ferramentas,
+  gráfico de tokens por tool, maiores saídas e dicas.
 
 ## O que faz
 
@@ -22,7 +27,7 @@ Também traz ferramentas para gastar menos tokens.
 - **⚙ / `/otimizar`**: abre o painel lateral com botões **Compactar contexto**, **rtk gain**, **rtk discover**
   e **Zerar estatísticas**, mais o relatório (contexto, cache, janela de 5 h, semana, custo estimado, tools que
   mais gastaram tokens, 5 maiores saídas e dicas). Onde não há painel, `/otimizar` imprime o relatório.
-- **🗜 Compactar**: roda o compact da sessão. No app desktop o mod ainda não pode compactar sozinho;
+- **Compactar** (no painel): roda o compact da sessão. No app desktop o mod ainda não pode compactar sozinho;
   aí ele avisa para digitar `/compact`.
 - **Aviso de cache**: toast quando faltam 45 s para o cache expirar e você está parado.
 - **Aviso semanal**: toast ao passar de 80% e 95% do limite semanal.
