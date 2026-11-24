@@ -27,8 +27,9 @@ function fmtK(n: number): string {
 type Tile = { value: string; label: string; color?: string }
 function tilesSvg(tiles: Tile[], width: number): string {
   const minTile = 92
-  const perRow = Math.max(1, Math.min(tiles.length, Math.floor(width / minTile)))
-  const rows = Math.ceil(tiles.length / perRow)
+  const maxPerRow = Math.max(1, Math.min(tiles.length, Math.floor(width / minTile)))
+  const rows = Math.ceil(tiles.length / maxPerRow)
+  const perRow = Math.ceil(tiles.length / rows)
   const tw = width / perRow
   const rh = 38
   const h = rows * rh
@@ -37,14 +38,15 @@ function tilesSvg(tiles: Tile[], width: number): string {
       const col = i % perRow
       const row = Math.floor(i / perRow)
       const x = col * tw
+      const tx = col === 0 ? 2 : x + 12
       const y = row * rh
       const sep =
         col > 0 ? `<line x1="${x.toFixed(1)}" y1="${y + 8}" x2="${x.toFixed(1)}" y2="${y + 30}" stroke="#3a3a3a"/>` : ''
       const val = t.value.replace(/&/g, '&amp;').replace(/</g, '&lt;')
       return (
         sep +
-        `<text x="${(x + 12).toFixed(1)}" y="${y + 18}" font-size="13" font-weight="700" fill="${t.color ?? '#ededed'}">${val}</text>` +
-        `<text x="${(x + 12).toFixed(1)}" y="${y + 32}" font-size="10" fill="#8d8d8d">${t.label}</text>`
+        `<text x="${tx.toFixed(1)}" y="${y + 18}" font-size="13" font-weight="700" fill="${t.color ?? '#ededed'}">${val}</text>` +
+        `<text x="${tx.toFixed(1)}" y="${y + 32}" font-size="10" fill="#8d8d8d">${t.label}</text>`
       )
     })
     .join('')
@@ -206,7 +208,7 @@ async function report($: EngineInterface): Promise<string> {
   const left = c ? c.at + c.ttlMs - now : 0
   const s = score(ctxPct, c ? c.hitPct : null)
   const weekly = usage.rateLimits.find(l => l.kind === 'seven_day')
-  const fiveH = usage.rateLimits.find(l => l.kind === 'five_hour')
+  const fiveH = sessionWindow(usage.rateLimits)
 
   const lines: string[] = []
   lines.push(`## Token Optimizer: nota ${letter(s)} (${s}/100)`)
@@ -219,8 +221,8 @@ async function report($: EngineInterface): Promise<string> {
       ? `- Cache: ${left > 0 ? `expira em ${shortTime(left)}` : 'expirado'}, ${c.hitPct}% do último pedido veio do cache (TTL ${c.ttlMs >= 3_600_000 ? '1h' : '5m'})`
       : '- Cache: sem pedido ainda',
   )
-  if (fiveH) lines.push(`- Janela de 5h: ${Math.round(fiveH.percentUsed)}%${fiveH.resetsAt ? ` (renova ${fiveH.resetsAt})` : ''}`)
-  if (weekly) lines.push(`- Semana: ${Math.round(weekly.percentUsed)}%${weekly.resetsAt ? ` (renova ${weekly.resetsAt})` : ''}`)
+  if (fiveH) lines.push(`- Janela de 5h: ${Math.round(fiveH.percentUsed)}%${fiveH.resetsAt ? ` (${resetLabel(fiveH.resetsAt)})` : ''}`)
+  if (weekly) lines.push(`- Semana: ${Math.round(weekly.percentUsed)}%${weekly.resetsAt ? ` (${resetLabel(weekly.resetsAt)})` : ''}`)
   if (usage.cost) lines.push(`- Custo estimado da sessão: US$ ${usage.cost.usd.toFixed(2)}`)
 
   const tools = Object.entries(st.byTool).sort((a, b) => b[1].tokens - a[1].tokens).slice(0, 6)
@@ -278,12 +280,27 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-function resetLabel(iso?: string): string {
-  if (!iso) return ''
+function timeLeft(iso?: string): string | null {
+  if (!iso) return null
   const t = Date.parse(iso)
-  if (Number.isNaN(t)) return iso
-  const h = Math.max(0, (t - Date.now()) / 3_600_000)
-  return h >= 24 ? `renova em ${Math.round(h / 24)}d` : `renova em ${Math.ceil(h)}h`
+  if (Number.isNaN(t)) return null
+  const m = Math.max(0, Math.round((t - Date.now()) / 60_000))
+  const d = Math.floor(m / 1440)
+  const h = Math.floor((m % 1440) / 60)
+  const mm = m % 60
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${String(mm).padStart(2, '0')}m`
+  return `${mm}m`
+}
+
+function resetLabel(iso?: string): string {
+  const left = timeLeft(iso)
+  return left === null ? (iso ?? '') : `renova em ${left}`
+}
+
+// Janela da sessão de uso: a de 5h, ou a janela curta que o plano reportar (qualquer uma que não seja semanal).
+function sessionWindow<T extends { kind: string }>(limits: readonly T[]): T | undefined {
+  return limits.find(l => l.kind === 'five_hour') ?? limits.find(l => !l.kind.startsWith('seven_day'))
 }
 
 async function collect($: EngineInterface): Promise<PaneData> {
@@ -294,7 +311,7 @@ async function collect($: EngineInterface): Promise<PaneData> {
   const ctxPct = Math.round(usage.context.percent ?? 0)
   const left = c ? c.at + c.ttlMs - (await $.clock.now()) : 0
   const w = usage.rateLimits.find(l => l.kind === 'seven_day')
-  const f = usage.rateLimits.find(l => l.kind === 'five_hour')
+  const f = sessionWindow(usage.rateLimits)
   const score_ = score(ctxPct, c ? c.hitPct : null)
 
   const tips: Tip[] = []
@@ -519,7 +536,7 @@ export const register: Register = on => {
     for (const mark of [80, 95]) {
       if (weekly && weekly.percentUsed >= mark && !weekWarned.has(mark)) {
         weekWarned.add(mark)
-        $.ui.toast(`Uso semanal passou de ${mark}%${weekly.resetsAt ? ` (renova ${weekly.resetsAt})` : ''}.`)
+        $.ui.toast(`Uso semanal passou de ${mark}%${weekly.resetsAt ? ` (${resetLabel(weekly.resetsAt)})` : ''}.`)
       }
     }
     return next(e)
@@ -689,15 +706,17 @@ export const register: Register = on => {
 
     const isOpen = await read($, expanded)
     const tn = await read($, turn)
-    const fiveH = usage.rateLimits.find(l => l.kind === 'five_hour')
+    const fiveH = sessionWindow(usage.rateLimits)
     const fivePct = fiveH ? Math.round(fiveH.percentUsed) : null
     const st = await read($, stats)
     const topTool = Object.entries(st.byTool).sort((a, b) => b[1].tokens - a[1].tokens)[0]
     const secs = Math.round(tn.lastMs / 1000)
-    const rowW = Math.max(240, Math.round((e.props.bodyColumns ?? 90) * 7.6) - 70)
+    const rowW = Math.max(240, Math.round((e.props.bodyColumns ?? 90) * 7.6) - 20)
     const hitColor = c ? (c.hitPct >= 80 ? GREEN : c.hitPct >= 50 ? YELLOW : RED) : undefined
     const tiles: Tile[] = [
       { value: fivePct === null ? '—' : `${fivePct}%`, label: 'janela 5h', color: fivePct === null ? undefined : usedColor(fivePct) },
+      { value: timeLeft(fiveH?.resetsAt) ?? '—', label: 'sessão acaba em', color: fiveH?.resetsAt ? '#7aa2f7' : undefined },
+      { value: timeLeft(weekly?.resetsAt) ?? '—', label: 'semana renova em', color: weekly?.resetsAt ? '#7aa2f7' : undefined },
       { value: `${fmtK(usage.context.tokens ?? 0)} / ${fmtK(usage.context.window)}`, label: 'tokens no contexto' },
       { value: c ? `${c.hitPct}%` : '—', label: 'acerto do cache', color: hitColor },
       { value: tn.turns ? `${secs}s · ${fmtK(tn.lastOut)}` : '—', label: 'último turno' },
@@ -750,7 +769,7 @@ export const register: Register = on => {
         </Box>
       </Box>
       {isOpen ? (
-        <Box paddingLeft={6} paddingTop={1}>
+        <Box paddingTop={1}>
           <Svg source={tilesSvg(tiles, rowW)} alt={tiles.map(t => `${t.label} ${t.value}`).join(', ')} width={rowW} />
         </Box>
       ) : null}
